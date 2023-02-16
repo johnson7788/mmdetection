@@ -2,45 +2,61 @@
 # coding: utf-8
 # 使用FasterRCNN进行目标检测训练
 import copy
-import os.path as osp
-
+import os
+from tqdm import tqdm
 import mmcv
 import numpy as np
 from mmcv import Config
 from mmdet.apis import set_random_seed
-
 from mmdet.datasets.builder import DATASETS
 from mmdet.datasets.custom import CustomDataset
 from mmdet.datasets import build_dataset
 from mmdet.models import build_detector
 from mmdet.apis import train_detector, inference_detector, show_result_pyplot
 
-@DATASETS.register_module()
-class KittiTinyDataset(CustomDataset):
+COSMETIC_CLASSES = []
+class_files = os.path.join("cosmetic", "train", "classes.txt")
+with open(class_files, "r") as f:
+    for line in f:
+        COSMETIC_CLASSES.append(line.strip())
 
-    CLASSES = ('Car', 'Pedestrian', 'Cyclist')
+@DATASETS.register_module()
+class CosmeticsDataset(CustomDataset):
+    CLASSES = COSMETIC_CLASSES
+    def __init__(self, *args, **kwargs):
+        """
+        生成类别信息
+        """
+        class2label = {k: i for i, k in enumerate(self.CLASSES)}
+        self.class2label = class2label
+        super().__init__(*args, **kwargs)
+        print(f"共有标签数量: {len(self.CLASSES)} 个")
 
     def load_annotations(self, ann_file):
-        cat2label = {k: i for i, k in enumerate(self.CLASSES)}
-        # load image list from file
-        image_list = mmcv.list_from_file(self.ann_file)
-    
+        # 读取标注文件
+        image_list = os.listdir(self.ann_file)
+        # image_list = image_list[:100]
+        print(f"要读取: {len(image_list)} 个标注文件, 读取中")
         data_infos = []
         # convert annotations to middle format
-        for image_id in image_list:
-            filename = f'{self.img_prefix}/{image_id}.jpeg'
+        image_prefix = self.ann_file.replace("labels", "images")
+        for image_id in tqdm(image_list,desc="读取"):
+            image_id = image_id.replace(".txt","")
+            filename = f'{image_prefix}/{image_id}.jpg'
+            if not os.path.exists(filename):
+                print(f"图片文件: {filename} 不存在，跳过")
+                continue
             image = mmcv.imread(filename)
             height, width = image.shape[:2]
     
-            data_info = dict(filename=f'{image_id}.jpeg', width=width, height=height)
+            data_info = dict(filename=f'{image_id}.jpg', width=width, height=height)
     
-            # load annotations
-            label_prefix = self.img_prefix.replace('image_2', 'label_2')
-            lines = mmcv.list_from_file(osp.join(label_prefix, f'{image_id}.txt'))
+            # 加载标注文件
+            lines = mmcv.list_from_file(os.path.join(self.ann_file, f'{image_id}.txt'))
     
             content = [line.strip().split(' ') for line in lines]
-            bbox_names = [x[0] for x in content]
-            bboxes = [[float(info) for info in x[4:8]] for x in content]
+            bbox_labels = [x[0] for x in content]
+            bboxes = [[float(info) for info in x[1:5]] for x in content]
     
             gt_bboxes = []
             gt_labels = []
@@ -48,14 +64,9 @@ class KittiTinyDataset(CustomDataset):
             gt_labels_ignore = []
     
             # filter 'DontCare'
-            for bbox_name, bbox in zip(bbox_names, bboxes):
-                if bbox_name in cat2label:
-                    gt_labels.append(cat2label[bbox_name])
-                    gt_bboxes.append(bbox)
-                else:
-                    gt_labels_ignore.append(-1)
-                    gt_bboxes_ignore.append(bbox)
-
+            for bbox_label, bbox in zip(bbox_labels, bboxes):
+                gt_labels.append(bbox_label)
+                gt_bboxes.append(bbox)
             data_anno = dict(
                 bboxes=np.array(gt_bboxes, dtype=np.float32).reshape(-1, 4),
                 labels=np.array(gt_labels, dtype=np.long),
@@ -76,32 +87,32 @@ cfg = Config.fromfile('../configs/faster_rcnn/faster_rcnn_r50_caffe_fpn_mstrain_
 # Given a config that trains a Faster R-CNN on COCO dataset, we need to modify some values to use it for training Faster R-CNN on KITTI dataset. We modify the config of datasets, learning rate schedules, and runtime settings
 
 # Modify dataset type and path
-cfg.dataset_type = 'KittiTinyDataset'
-cfg.data_root = 'kitti_tiny/'
+cfg.dataset_type = 'CosmeticsDataset'
+cfg.data_root = 'cosmetic/'
 
-cfg.data.test.type = 'KittiTinyDataset'
-cfg.data.test.data_root = 'kitti_tiny/'
-cfg.data.test.ann_file = 'train.txt'
-cfg.data.test.img_prefix = 'training/image_2'
+cfg.data.train.type = 'CosmeticsDataset'
+cfg.data.train.data_root = 'cosmetic/'
+cfg.data.train.ann_file = 'train/labels'
+cfg.data.train.img_prefix = 'train/images'
+cfg.runner.max_epochs = 100
+cfg.data.test.type = 'CosmeticsDataset'
+cfg.data.test.data_root = 'cosmetic/'
+cfg.data.test.ann_file = 'dev/labels'
+cfg.data.test.img_prefix = 'dev/images'
 
-cfg.data.train.type = 'KittiTinyDataset'
-cfg.data.train.data_root = 'kitti_tiny/'
-cfg.data.train.ann_file = 'train.txt'
-cfg.data.train.img_prefix = 'training/image_2'
+cfg.data.val.type = 'CosmeticsDataset'
+cfg.data.val.data_root = 'cosmetic/'
+cfg.data.val.ann_file = 'dev/labels'
+cfg.data.val.img_prefix = 'dev/images'
 
-cfg.data.val.type = 'KittiTinyDataset'
-cfg.data.val.data_root = 'kitti_tiny/'
-cfg.data.val.ann_file = 'val.txt'
-cfg.data.val.img_prefix = 'training/image_2'
-
-# modify num classes of the model in box head
-cfg.model.roi_head.bbox_head.num_classes = 3
+# 修改类别数量
+cfg.model.roi_head.bbox_head.num_classes = len(COSMETIC_CLASSES)
 # If we need to finetune a model based on a pre-trained detector, we need to
 # use load_from to set the path of checkpoints.
 cfg.load_from = '../checkpoints/faster_rcnn_r50_caffe_fpn_mstrain_3x_coco_20210526_095054-1f77628b.pth'
 
 # Set up working dir to save files and logs.
-cfg.work_dir = './tutorial_exps'
+cfg.work_dir = './cosmetic_exps'
 
 # The original learning rate (LR) is set for 8-GPU training.
 # We divide it by 8 since we only use one GPU.
@@ -148,7 +159,7 @@ model = build_detector(cfg.model)
 model.CLASSES = datasets[0].CLASSES
 
 # Create work_dir
-mmcv.mkdir_or_exist(osp.abspath(cfg.work_dir))
+mmcv.mkdir_or_exist(os.path.abspath(cfg.work_dir))
 train_detector(model, datasets, cfg, distributed=False, validate=True)
 
 
@@ -176,11 +187,11 @@ train_detector(model, datasets, cfg, distributed=False, validate=True)
 # After finetuning the detector, let's visualize the prediction results!
 
 
-img = mmcv.imread('kitti_tiny/training/image_2/000068.jpeg')
+img = mmcv.imread('cosmetic/dev/images/fffbb778f15b22a652df7f2672cf8061.jpg')
 #
 model.cfg = cfg
 result = inference_detector(model, img)
-show_result_pyplot(model, img, result, out_file="000068_res.png")
+show_result_pyplot(model, img, result, out_file="fffbb778f15b22a652df7f2672cf8061_res.png")
 
 
 # ## What to Do Next?
